@@ -1,0 +1,378 @@
+.page {
+  min-height: 100vh;
+  color: #e7e9ff;
+  background: #07080c;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  position: relative;
+}
+
+.topBar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 22px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: #08090f;
+}
+
+.brandBlock {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand {
+  font-size: 2rem;
+  font-weight: 800;
+  color: #6f75ff;
+  letter-spacing: -0.03em;
+}
+
+.connected {
+  color: #1fd47f;
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  font-weight: 700;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(31, 212, 127, 0.1);
+}
+
+.topActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.signal {
+  font-size: 0.8rem;
+  color: #b7bcff;
+}
+
+.content {
+  display: grid;
+  grid-template-columns: 76px 1fr 1.15fr;
+  min-height: 0;
+}
+
+.sideRail {
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  background: #06070d;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 10px;
+}
+
+.railItem {
+  border: 1px solid rgba(111, 117, 255, 0.28);
+  color: #adb2ff;
+  background: rgba(111, 117, 255, 0.08);
+  border-radius: 12px;
+  padding: 10px 8px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+}
+
+.leftPanel {
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 24px;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  overflow: auto;
+}
+
+.orbWrap {
+  position: relative;
+  width: 220px;
+  height: 220px;
+  margin: 10px auto 2px;
+}
+
+.orbGlow {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(111, 117, 255, 0.38), transparent 68%);
+  filter: blur(8px);
+}
+
+.orb {
+  position: absolute;
+  inset: 24px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 2.2rem;
+  background: linear-gradient(145deg, #6b6ef7, #777bff);
+  box-shadow: 0 0 48px rgba(106, 111, 247, 0.35);
+}
+
+.kicker {
+  margin: 0;
+  text-align: center;
+  color: #8c90a8;
+  letter-spacing: 0.22em;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.transcript {
+  margin: 0;
+  text-align: center;
+  font-size: clamp(1.4rem, 3vw, 3rem);
+  line-height: 1.17;
+  font-weight: 600;
+  color: #f7f8ff;
+}
+
+.assistant {
+  margin: 0;
+  text-align: center;
+  color: #b9beea;
+  font-size: 0.95rem;
+}
+
+.controls {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.input {
+  width: 100%;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(23, 24, 33, 0.75);
+  color: #eff0ff;
+  padding: 12px 13px;
+  font: inherit;
+  resize: vertical;
+  min-height: 90px;
+}
+
+.controlRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.primaryButton,
+.secondaryButton {
+  border-radius: 10px;
+  padding: 10px 12px;
+  font: inherit;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.primaryButton {
+  color: #17154d;
+  background: #8387ff;
+  font-weight: 700;
+}
+
+.secondaryButton {
+  color: #d9ddff;
+  background: rgba(131, 135, 255, 0.14);
+  border-color: rgba(131, 135, 255, 0.3);
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.rightPanel {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 0;
+}
+
+.streamHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: #0b0c12;
+}
+
+.streamHeader h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  letter-spacing: 0.09em;
+}
+
+.streamHeader span {
+  color: #7f86ff;
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  font-weight: 700;
+}
+
+.feed {
+  overflow: auto;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.bubble {
+  border-radius: 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  max-width: 88%;
+}
+
+.bubble p {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+
+.bubble small {
+  display: block;
+  margin-top: 8px;
+  color: #a8accf;
+  letter-spacing: 0.08em;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+}
+
+.bubbleAssistant {
+  background: rgba(36, 37, 48, 0.95);
+  border-left: 3px solid #656cff;
+}
+
+.bubbleUser {
+  margin-left: auto;
+  text-align: right;
+  background: rgba(80, 84, 196, 0.22);
+  border-color: rgba(129, 134, 255, 0.4);
+}
+
+.bubbleSystem {
+  background: rgba(24, 25, 30, 0.9);
+  border-style: dashed;
+}
+
+.logs {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: #0b0b10;
+  padding: 10px 14px;
+  max-height: 170px;
+  overflow: auto;
+  display: grid;
+  gap: 6px;
+}
+
+.logLine {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.74rem;
+  color: #b4b8dd;
+}
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: #06070d;
+  color: #9ea4d8;
+  letter-spacing: 0.12em;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.questionTray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.questionChip {
+  border: 1px solid rgba(131, 135, 255, 0.4);
+  background: rgba(20, 21, 31, 0.95);
+  color: #d5d9ff;
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.errorBanner {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  max-width: min(90vw, 620px);
+  border: 1px solid rgba(245, 104, 104, 0.35);
+  background: rgba(128, 25, 25, 0.22);
+  color: #ffc6c6;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 0.85rem;
+}
+
+@media (max-width: 1080px) {
+  .content {
+    grid-template-columns: 1fr;
+  }
+
+  .sideRail {
+    display: none;
+  }
+
+  .leftPanel {
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .rightPanel {
+    min-height: 56vh;
+  }
+}
+
+@media (max-width: 700px) {
+  .brand {
+    font-size: 1.7rem;
+  }
+
+  .connected {
+    display: none;
+  }
+
+  .topBar {
+    padding: 12px 14px;
+  }
+
+  .leftPanel {
+    padding: 14px;
+  }
+
+  .orbWrap {
+    width: 170px;
+    height: 170px;
+  }
+
+  .orb {
+    inset: 20px;
+    font-size: 1.8rem;
+  }
+
+  .footer {
+    font-size: 0.62rem;
+    letter-spacing: 0.08em;
+  }
+}
