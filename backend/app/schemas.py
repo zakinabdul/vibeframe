@@ -72,3 +72,7 @@ class CanvasCurrentResponse(BaseModel):
 class PaperOpenResponse(BaseModel):
     opened: bool = False
     message: str = ""
+
+
+class ResetSessionRequest(BaseModel):
+    conversation_id: str | None = None

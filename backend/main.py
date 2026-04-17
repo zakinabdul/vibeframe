@@ -21,6 +21,7 @@ from app.schemas import (
     RefineRequest,
     RefineResponse,
     PaperOpenResponse,
+    ResetSessionRequest,
 )
 
 paper_client = PaperMCPClient()
@@ -206,3 +207,13 @@ async def paper_open() -> PaperOpenResponse:
         return PaperOpenResponse(opened=True, message="Paper Desktop launch command sent.")
     except Exception as exc:
         return PaperOpenResponse(opened=False, message=f"Failed to launch Paper Desktop: {exc}")
+
+
+@app.post("/session/reset")
+async def session_reset(payload: ResetSessionRequest) -> dict[str, str]:
+    """Clear a conversation session so the next generate call creates a fresh canvas."""
+    pipeline = get_agent_pipeline()
+    conversation_id = payload.conversation_id or "default"
+    if conversation_id in pipeline._conversation_sessions:
+        del pipeline._conversation_sessions[conversation_id]
+    return {"status": "reset", "conversation_id": conversation_id}
