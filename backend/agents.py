@@ -5,42 +5,42 @@ from typing import Any, Literal, TypedDict
 import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
+from langchain_mistralai import ChatMistralAI
 from langgraph.graph import END, START, StateGraph
 
 from app.config import settings
 from app.paper_mcp import PaperMCPClient, PaperMCPProtocolError
 
 
-DESIGNER_SYSTEM_PROMPT = """You are Vibeframe's Principal Design Engineer. Your goal is to output a "Best-in-Class" landing page that looks like a high-end Dribbble or Linear.app concept.
+DESIGNER_SYSTEM_PROMPT = """You are Vibeframe's Principal Design Engineer.
+Your job is to produce a premium, production-quality landing page that feels intentional, editorial, and distinctly branded.
 
-CORE DESIGN PHILOSOPHY:
-- Modern UI isn't just about layout; it's about depth, whitespace, and subtle gradients.
-- Avoid 1990s web defaults. Use "Soft UI" or "Glassmorphism" where appropriate.
-- Every section must feel like a deliberate "scene."
-
-VISUAL POLISH RULES (CRITICAL):
-1. BACKGROUNDS: Never use flat #ccc or #f7f7f7. Use ultra-subtle mesh gradients or "Surface" colors (e.g., #0A0A0B for dark or #FAFAFB for light).
-2. SHADOWS: Use multi-layered soft shadows: `box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06)`.
-3. BUTTONS: Add a subtle 1px top-border (white with 0.1 opacity) to buttons to give them a "3D" premium feel.
-4. BORDERS: Use "Subtle Borders." Instead of #ccc, use `rgba(255,255,255,0.08)` for dark mode or `rgba(0,0,0,0.05)` for light.
-5. RADIUS: Cards must have a minimum of 24px border-radius.
+DESIGN GOAL & MODERN AESTHETICS:
+- Avoid generic SaaS templates and bland centered hero blocks.
+- Create a stunning, modern design with rich aesthetics. Prioritize visual excellence.
+- Use best practices in modern web design: vibrant and harmonious colors, elegant dark modes (if requested), dynamic layouts, and smooth gradients.
+- Build a strong visual system with clear hierarchy, deliberate spacing, layered surfaces, soft depth, and restrained highlights.
+- Implement modern typography (e.g., system fonts like Inter or similar styling) with excellent contrast.
+- Every section should look intentionally designed and premium, mimicking a top-tier Dribbble shot or cutting-edge startup landing page.
 
 STRUCTURAL REQUIREMENTS:
-- Use `display: flex` and `display: grid` exclusively. 
-- HERO: Must be cinematic. Use a "Glow" effect (a radial gradient div behind the text) to create depth.
-- TYPOGRAPHY: Use a system font stack: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'.
-- SPACING: Use the "8pt Grid System." Everything should be multiples of 8 (16, 24, 32, 64, 128).
+- Required sections in order: navigation, hero, social proof/trust, features, how it works, CTA, footer.
+- The hero must establish the brand immediately with a clear headline, supporting copy, and a visible call to action.
+- Include at least one trust signal and one visually distinct feature presentation.
+- Make the layout feel balanced on a large 1440px canvas.
 
 TECHNICAL CONSTRAINTS:
-1. One root <div> only.
-2. 100% Inline styles. No <style> tags.
-3. Use `min-height: 100vh` for sections to ensure they feel full and intentional.
-4. Max-width container: Wrap content in a 1200px max-width div centered with `margin: 0 auto`.
+1. Return ONE root `<div>` only. This root div must encapsulate all page content.
+2. The root div MUST have `style="width: 100%; display: flex; flex-direction: column;"` so sections stack vertically. (CRITICAL: Do NOT use flex-direction row on the root).
+3. Do not include artboard/canvas wrapper code, just the page content.
+4. Use 100% inline styles. No `<style>` tags. Do not rely on CSS classes.
+5. Use flexbox (`display: flex`) or CSS grid for internal layouts. Ensure responsive-like flow by setting full widths where appropriate.
+6. Use border radius, shadows, and subtle gradients with restraint; avoid noisy decoration.
 
 OUTPUT CONTRACT:
-- Return strict JSON: {"summary": "Brief design rationale", "html": "Full HTML string"}
+- Return strict JSON only: {"summary": "Brief design rationale", "html": "Full HTML string"}
 - No markdown formatting.
-- The UI must be BEAUTIFUL, modern, and high-contrast.
+- The result must look premium, polished, and breathtaking.
 """
 
 
@@ -53,20 +53,40 @@ Evaluate current landing-page quality and return strict JSON only:
 }
 
 Scoring rubric:
-- 1-3: broken, missing sections, poor hierarchy
-- 4-6: functional but weak aesthetics and layout
-- 7-8: strong baseline with minor polish gaps
-- 9-10: excellent, production-quality visual system and hierarchy
+- 1-3: broken, missing sections, poor hierarchy, or visually generic
+- 4-6: functional but weak aesthetics, weak spacing, or templated feel
+- 7-8: strong baseline with minor polish gaps and a mostly coherent system
+- 9-10: excellent, production-quality visual system, hierarchy, and distinct brand feel
 
 Focus checks:
-- Sections exist organically to fit the product's genre (e.g. Nav and Hero are present, but other sections vary cleanly)
-- Visual hierarchy is strong and readable
-- Color system follows spec
-- Spacing is generous and uncluttered
-- Buttons and cards feel intentionally styled
-- Overall page looks premium and coherent
+- Sections exist organically to fit the product's genre and narrative.
+- Visual hierarchy is strong and readable from hero to footer.
+- Color system is coherent, high-contrast, and consistent with the palette.
+- Spacing is generous, rhythmical, and uncluttered.
+- Buttons, cards, and trust elements feel intentionally designed rather than generic.
+- Penalize designs that look like default UI kits, repeated boxes, or empty shell pages.
+- Overall page looks premium, coherent, and clearly tailored to the brief.
 
 Be concise and actionable.
+"""
+
+
+REFINE_SYSTEM_PROMPT = """You are Vibeframe's Refine Agent.
+You perform SURGICAL edits to an existing landing page HTML.
+
+PRIMARY RULE:
+- Preserve the current design system, layout language, spacing rhythm, colors, typography, and existing sections.
+- Do NOT redesign the full page unless the user explicitly asks for a full redesign.
+
+REFINE BEHAVIOR:
+- Apply only the user's requested tweak.
+- If user asks to add a section, add only that section and keep all existing sections visually consistent.
+- Keep changes minimal and localized; untouched parts should remain effectively identical.
+- Keep one root <div> and valid inline-style HTML output.
+
+OUTPUT CONTRACT:
+- Return strict JSON only: {"summary": "what changed", "html": "full updated HTML"}
+- No markdown fences.
 """
 
 
@@ -176,14 +196,20 @@ class ConversationSession(TypedDict, total=False):
 
 
 class VibeframeAgentPipeline:
-    def __init__(self, paper_client: PaperMCPClient, event_broker: AgentEventBroker, groq_api_key: str) -> None:
+    def __init__(self, paper_client: PaperMCPClient, event_broker: AgentEventBroker, groq_api_key: str, mistral_api_key: str = "") -> None:
         self.paper_client = paper_client
         self.event_broker = event_broker
         self.gemini_api_key = settings.gemini_api_key
         self.gemini_critic_model = settings.gemini_critic_model
         self.gemini_api_base = settings.gemini_api_base.rstrip("/")
-        self.designer_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.35, api_key=groq_api_key)
-        self.critic_llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.1, api_key=groq_api_key)
+        self.groq_api_key = groq_api_key
+        # Initialize Mistral with longer timeout (60s for complex design generation)
+        mistral_key = mistral_api_key or settings.mistral_api_key
+        self.designer_llm = ChatMistralAI(model="mistral-large-latest", temperature=0.35, api_key=mistral_key, timeout=60.0)
+        self.critic_llm = ChatMistralAI(model="pixtral-12b-2409", temperature=0.1, api_key=mistral_key, timeout=60.0)
+        # Fallback to Groq if Mistral fails
+        self.designer_llm_fallback = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.35, api_key=groq_api_key)
+        self.critic_llm_fallback = ChatGroq(model="llama-3.1-8b-instant", temperature=0.1, api_key=groq_api_key)
         self._conversation_sessions: dict[str, ConversationSession] = {}
         self._gemini_circuit_open_until: float = 0.0  # epoch timestamp; Gemini skipped until this time
         self.graph = self._build_graph()
@@ -311,10 +337,9 @@ Never use bullet points or bold markdown in your spoken responses. Keep it conve
     async def run_refine(self, artboard_id: str, instruction: str) -> dict[str, Any]:
         await self.event_broker.publish({"type": "refine_started", "artboard_id": artboard_id})
         current_html = await self._get_document_html(node_id=artboard_id)
-        refined = await self._ask_designer(
-            brief=instruction,
+        refined = await self._ask_designer_refine(
+            instruction=instruction,
             current_html=current_html,
-            critique={"suggestions": ["Apply the user instruction while preserving structure and visual quality."]},
         )
 
         write_result, mode_used = await self._apply_refine_html(artboard_id, refined["html"])
@@ -966,10 +991,21 @@ Return strict JSON only."""
         await self.event_broker.publish({"type": "designer_refine_started", "round": state.get("round", 0)})
 
         current_html = await self._get_document_html(node_id=artboard_id)
-        design = await self._ask_designer(
-            brief=state.get("brief", ""),
+        critique = state.get("critique", {})
+        suggestions = critique.get("suggestions", []) if isinstance(critique, dict) else []
+        issues = critique.get("issues", []) if isinstance(critique, dict) else []
+        refine_instruction_parts = [
+            "Update the existing page with minimal, localized edits only.",
+            "Preserve the current design system, spacing, typography, and all unrelated sections.",
+        ]
+        if suggestions:
+            refine_instruction_parts.append(f"Address these suggestions: {json.dumps(suggestions, ensure_ascii=True)}")
+        if issues:
+            refine_instruction_parts.append(f"Fix these issues: {json.dumps(issues, ensure_ascii=True)}")
+
+        design = await self._ask_designer_refine(
+            instruction=" ".join(refine_instruction_parts),
             current_html=current_html,
-            critique=state.get("critique", {}),
         )
 
         write_result, mode_used = await self._apply_refine_html(artboard_id, design["html"])
@@ -1025,15 +1061,29 @@ Return strict JSON only."""
             "Generate complete landing page HTML with all required sections and inline styles."
         )
 
-        response = await self.designer_llm.ainvoke(
-            [
-                SystemMessage(content=DESIGNER_SYSTEM_PROMPT),
-                HumanMessage(content=message),
-            ]
-        )
+        # Try Mistral first, fall back to Groq if it fails
+        response = None
+        try:
+            response = await self.designer_llm.ainvoke(
+                [
+                    SystemMessage(content=DESIGNER_SYSTEM_PROMPT),
+                    HumanMessage(content=message),
+                ]
+            )
+        except Exception as e:
+            print(f"Mistral designer failed: {e}. Falling back to Groq...")
+            response = await self.designer_llm_fallback.ainvoke(
+                [
+                    SystemMessage(content=DESIGNER_SYSTEM_PROMPT),
+                    HumanMessage(content=message),
+                ]
+            )
+        
         payload = self._try_parse_json(getattr(response, "content", ""))
         if not isinstance(payload, dict):
-            raise ValueError("Designer output was not a JSON object.")
+            raw_content = getattr(response, "content", "")
+            print(f"FAILED TO PARSE JSON. Content length: {len(raw_content)} chars")
+            raise ValueError(f"Designer output was not valid JSON. Content length: {len(raw_content)}")
 
         summary = str(payload.get("summary", "Generated rich landing page."))
         html = str(payload.get("html", "")).strip()
@@ -1045,60 +1095,86 @@ Return strict JSON only."""
             "html": html,
         }
 
+    async def _ask_designer_refine(self, instruction: str, current_html: str) -> dict[str, str]:
+        current_html_hint = current_html or "<empty-canvas />"
+        message = (
+            f"User refinement instruction:\n{instruction}\n\n"
+            "Current canvas HTML (authoritative source):\n"
+            f"{current_html_hint}\n\n"
+            "Apply only the requested change with minimal edits. Keep all unrelated content unchanged."
+        )
+
+        response = None
+        try:
+            response = await self.designer_llm.ainvoke(
+                [
+                    SystemMessage(content=REFINE_SYSTEM_PROMPT),
+                    HumanMessage(content=message),
+                ]
+            )
+        except Exception as e:
+            print(f"Mistral refine failed: {e}. Falling back to Groq...")
+            response = await self.designer_llm_fallback.ainvoke(
+                [
+                    SystemMessage(content=REFINE_SYSTEM_PROMPT),
+                    HumanMessage(content=message),
+                ]
+            )
+
+        payload = self._try_parse_json(getattr(response, "content", ""))
+        if not isinstance(payload, dict):
+            raw_content = getattr(response, "content", "")
+            print(f"FAILED TO PARSE JSON FROM REFINE. Content length: {len(raw_content)} chars")
+            raise ValueError("Refine output was not valid JSON.")
+
+        summary = str(payload.get("summary", "Applied targeted refinement."))
+        html = str(payload.get("html", "")).strip()
+        if not html:
+            raise ValueError("Refine output did not contain html.")
+
+        return {
+            "summary": summary,
+            "html": html,
+        }
+
     async def _ask_critic(self, brief: str, current_html: str, artboard_id: str) -> dict[str, Any]:
         screenshot = await self._get_artboard_screenshot_payload(artboard_id)
 
-        if self.gemini_api_key:
-            import time as _time
-            _now = _time.monotonic()
-            if _now < self._gemini_circuit_open_until:
-                # Circuit open — Gemini is rate-limited; skip to Groq immediately
-                remaining = int(self._gemini_circuit_open_until - _now)
-                await self.event_broker.publish(
-                    {
-                        "type": "critic_gemini_skipped",
-                        "reason": "circuit_open",
-                        "retry_in_seconds": remaining,
-                    }
-                )
-            else:
-                try:
-                    critique = await self._ask_critic_with_gemini(brief=brief, current_html=current_html, screenshot=screenshot)
-                    await self.event_broker.publish(
-                        {
-                            "type": "critic_provider_used",
-                            "provider": "gemini",
-                            "model": self.gemini_critic_model,
-                            "used_screenshot": bool(screenshot),
-                        }
-                    )
-                    return self._normalize_critique_payload(critique)
-                except Exception as exc:
-                    # Trip the circuit breaker on 429; all other errors also fall back
-                    if "429" in str(exc):
-                        self._gemini_circuit_open_until = _time.monotonic() + 60.0
-                    await self.event_broker.publish(
-                        {
-                            "type": "critic_provider_fallback",
-                            "from": "gemini",
-                            "to": "groq",
-                            "message": str(exc),
-                            "circuit_tripped": "429" in str(exc),
-                        }
-                    )
+        message_content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    f"User brief:\n{brief}\n\n"
+                    "Critique the current design visually with strict JSON output only.\n"
+                    "If screenshot is unavailable, use HTML cues and report lower confidence.\n\n"
+                    f"Current canvas HTML:\n{current_html}"
+                ),
+            }
+        ]
 
-        message = (
-            f"User brief:\n{brief}\n\n"
-            f"Current canvas HTML:\n{current_html}\n\n"
-            "Provide score, issues, and suggestions as strict JSON."
-        )
+        if screenshot:
+            mime_type, image_b64 = screenshot
+            data_url = f"data:{mime_type};base64,{image_b64}"
+            message_content.append({"type": "image_url", "image_url": {"url": data_url}})
 
-        response = await self.critic_llm.ainvoke(
-            [
-                SystemMessage(content=CRITIC_SYSTEM_PROMPT),
-                HumanMessage(content=message),
-            ]
-        )
+        # Fallback to Groq if Mistral fails
+        response = None
+        try:
+            response = await self.critic_llm.ainvoke(
+                [
+                    SystemMessage(content=CRITIC_SYSTEM_PROMPT),
+                    HumanMessage(content=message_content),
+                ]
+            )
+        except Exception as e:
+            print(f"Mistral critic failed: {e}. Falling back to Groq...")
+            response = await self.critic_llm_fallback.ainvoke(
+                [
+                    SystemMessage(content=CRITIC_SYSTEM_PROMPT),
+                    HumanMessage(content=message_content),
+                ]
+            )
+        
         payload = self._try_parse_json(getattr(response, "content", ""))
         if not isinstance(payload, dict):
             raise ValueError("Critic output was not a JSON object.")
@@ -1106,70 +1182,13 @@ Return strict JSON only."""
         await self.event_broker.publish(
             {
                 "type": "critic_provider_used",
-                "provider": "groq",
-                "model": "llama-3.1-8b-instant",
-                "used_screenshot": False,
+                "provider": "mistral",
+                "model": "pixtral-12b-2409",
+                "used_screenshot": bool(screenshot),
             }
         )
 
         return self._normalize_critique_payload(payload)
-
-    async def _ask_critic_with_gemini(
-        self,
-        *,
-        brief: str,
-        current_html: str,
-        screenshot: tuple[str, str] | None,
-    ) -> dict[str, Any]:
-        url = f"{self.gemini_api_base}/models/{self.gemini_critic_model}:generateContent"
-        parts: list[dict[str, Any]] = [
-            {
-                "text": (
-                    f"User brief:\n{brief}\n\n"
-                    "Critique the current design visually with strict JSON output only."
-                    " If screenshot is unavailable, use HTML cues and report lower confidence.\n\n"
-                    f"Current canvas HTML:\n{current_html}"
-                )
-            }
-        ]
-
-        if screenshot:
-            mime_type, image_b64 = screenshot
-            parts.append({"inline_data": {"mime_type": mime_type, "data": image_b64}})
-
-        payload = {
-            "systemInstruction": {"parts": [{"text": CRITIC_SYSTEM_PROMPT}]},
-            "contents": [{"role": "user", "parts": parts}],
-            "generationConfig": {
-                "temperature": 0.1,
-                "responseMimeType": "application/json",
-            },
-        }
-
-        async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.post(url, params={"key": self.gemini_api_key}, json=payload)
-            response.raise_for_status()
-            body = response.json()
-
-        candidates = body.get("candidates", []) if isinstance(body, dict) else []
-        if not isinstance(candidates, list) or not candidates:
-            raise ValueError("Gemini critic response did not include candidates.")
-
-        candidate = candidates[0] if isinstance(candidates[0], dict) else {}
-        content = candidate.get("content", {}) if isinstance(candidate, dict) else {}
-        parts = content.get("parts", []) if isinstance(content, dict) else []
-        text_payload = ""
-        if isinstance(parts, list):
-            for part in parts:
-                if isinstance(part, dict) and isinstance(part.get("text"), str):
-                    text_payload = part["text"]
-                    break
-
-        parsed = self._try_parse_json(text_payload)
-        if not isinstance(parsed, dict):
-            raise ValueError("Gemini critic output was not valid JSON.")
-
-        return parsed
 
     @staticmethod
     def _normalize_critique_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1314,6 +1333,8 @@ Return strict JSON only."""
                     "height": "auto",
                     "minHeight": "900px",
                     "backgroundColor": "#0a0a0a",
+                    "display": "flex",
+                    "flexDirection": "column",
                 }
             }
         )
@@ -1399,13 +1420,52 @@ Return strict JSON only."""
             return None
 
         try:
-            return json.loads(text)
+            return json.loads(text, strict=False)
         except json.JSONDecodeError:
+            # First fallback: extract text between { and }
             start = text.find("{")
             end = text.rfind("}")
             if start >= 0 and end > start:
                 try:
-                    return json.loads(text[start : end + 1])
+                    extracted = text[start : end + 1]
+                    return json.loads(extracted, strict=False)
                 except json.JSONDecodeError:
-                    return None
+                    # If extracted JSON also fails, try to fix incomplete patterns
+                    try:
+                        fixed = VibeframeAgentPipeline._fix_incomplete_json(extracted)
+                        return json.loads(fixed, strict=False)
+                    except json.JSONDecodeError as e:
+                        print(f"JSONDecodeError: Failed to parse. Error: {str(e)[:80]}. Length: {len(text)}")
+                        return None
             return None
+
+    @staticmethod
+    def _fix_incomplete_json(text: str) -> str:
+        """Fix incomplete JSON by closing unclosed brackets and quotes."""
+        depth = 0
+        in_string = False
+        escape_next = False
+        
+        for char in text:
+            if escape_next:
+                escape_next = False
+                continue
+            if char == '\\':
+                escape_next = True
+                continue
+            if char == '"' and not escape_next:
+                in_string = not in_string
+            elif not in_string:
+                if char in '{[':
+                    depth += 1
+                elif char in '}]':
+                    depth -= 1
+        
+        # Close any open strings and brackets
+        if in_string:
+            text += '"'
+        while depth > 0:
+            text += '}'
+            depth -= 1
+        
+        return text

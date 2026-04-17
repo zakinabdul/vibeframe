@@ -42,6 +42,7 @@ def get_agent_pipeline() -> VibeframeAgentPipeline:
         paper_client=paper_client,
         event_broker=event_broker,
         groq_api_key=settings.groq_api_key,
+        mistral_api_key=settings.mistral_api_key,
     )
     return agent_pipeline
 
