@@ -11,9 +11,11 @@ Vibeframe is a voice-driven multi-agent UI design system built for the Contra x 
 - Backend: FastAPI (Python), port 8000.
 - Frontend: Next.js, port 3000.
 - Canvas: Paper Design Desktop app via MCP at PAPER_MCP_URL.
+- Active generation flow: `/generate`, `/refine`, `/canvas/current`, `/stream`, `/paper/open`, `/session/reset`.
+- Legacy compatibility flow: `/api/design` and the older orchestrator path.
 - Designer agent target: Groq llama-3.3-70b-versatile.
 - Critic agent target: Gemini Flash family for screenshot-based critique.
-- Default critic model: gemini-2.5-flash (or newest stable Flash available in your project).
+- Default critic model: gemini-2.5-flash or the newest stable Flash variant available in the project.
 - Do not adopt deprecated Flash variants for new implementation work.
 - Orchestration: LangGraph.
 - Voice input: Web Speech API (Chrome only).
@@ -25,6 +27,8 @@ Vibeframe is a voice-driven multi-agent UI design system built for the Contra x 
 - Handle MCP connection failures gracefully with clear user-facing error messages.
 - Keep LangGraph state typed with TypedDict.
 - Stream agent events to frontend via SSE on GET /stream.
+- Prefer incremental fixes that preserve the live pipeline before removing compatibility code.
+- Treat the Paper canvas output as the primary product; do not let the control panel drift into generic starter-template styling.
 - Frontend styling policy: Tailwind-only for all new UI and all touched UI files.
 - Do not add UI libraries. Avoid full rewrite-only styling migrations unless user asks.
 - For legacy non-Tailwind sections, migrate incrementally when editing nearby code.
@@ -58,3 +62,4 @@ Unless user says otherwise, prioritize:
 2. Integrating critic visual feedback loop safely.
 3. Improving SSE event fidelity for frontend UX.
 4. Adding voice-driven flow polish without regressing existing endpoints.
+5. Removing stale styling or compatibility files only after the active flow is stable.
