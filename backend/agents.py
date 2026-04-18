@@ -2,14 +2,39 @@ import asyncio
 import json
 from typing import Any, Literal, TypedDict
 
-import httpx
+from langchain_core.caches import BaseCache
+from langchain_core.callbacks import Callbacks
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langchain_mistralai import ChatMistralAI
 from langgraph.graph import END, START, StateGraph
+from langsmith import traceable
 
 from app.config import settings
 from app.paper_mcp import PaperMCPClient, PaperMCPProtocolError
+
+
+def _ensure_chat_models_ready() -> None:
+    """Resolve forward refs for chat model classes under newer Pydantic runtimes."""
+    try:
+        ChatMistralAI.model_rebuild(
+            force=True,
+            _types_namespace={
+                "BaseCache": BaseCache,
+                "Callbacks": Callbacks,
+            },
+        )
+        ChatGroq.model_rebuild(
+            force=True,
+            _types_namespace={
+                "BaseCache": BaseCache,
+                "Callbacks": Callbacks,
+            },
+        )
+    except TypeError:
+        # Older/alternate signatures may not accept _types_namespace.
+        ChatMistralAI.model_rebuild(force=True)
+        ChatGroq.model_rebuild(force=True)
 
 
 DESIGNER_SYSTEM_PROMPT = """You are Vibeframe's Principal Design Engineer.
@@ -199,10 +224,8 @@ class VibeframeAgentPipeline:
     def __init__(self, paper_client: PaperMCPClient, event_broker: AgentEventBroker, groq_api_key: str, mistral_api_key: str = "") -> None:
         self.paper_client = paper_client
         self.event_broker = event_broker
-        self.gemini_api_key = settings.gemini_api_key
-        self.gemini_critic_model = settings.gemini_critic_model
-        self.gemini_api_base = settings.gemini_api_base.rstrip("/")
         self.groq_api_key = groq_api_key
+        _ensure_chat_models_ready()
         # Initialize Mistral with longer timeout (60s for complex design generation)
         mistral_key = mistral_api_key or settings.mistral_api_key
         self.designer_llm = ChatMistralAI(model="mistral-large-latest", temperature=0.35, api_key=mistral_key, timeout=60.0)
@@ -214,10 +237,11 @@ class VibeframeAgentPipeline:
         self._gemini_circuit_open_until: float = 0.0  # epoch timestamp; Gemini skipped until this time
         self.graph = self._build_graph()
 
+    @traceable(name="vibeframe.generate_friendly_message", run_type="llm")
     async def _generate_friendly_message(self, prompt: str) -> str:
         system_content = """You are Vibeframe, a friendly and enthusiastic AI web designer. 
 You speak like a talented creative colleague — warm, excited about the work, occasionally playful. Never robotic. 
-Never use bullet points or bold markdown in your spoken responses. Keep it conversational, like texting a friend who happens to be a great designer. 2-3 sentences max."""
+Never use bullet points or bold markdown in your spoken responses. Keep it conversational, like texting a friend who happens to be a great designer. 1-2 sentences max."""
         try:
             response = await self.designer_llm.ainvoke(
                 [
@@ -361,6 +385,7 @@ Never use bullet points or bold markdown in your spoken responses. Keep it conve
             "tool_result": write_result,
             "mode_used": mode_used,
         }
+    @traceable(name="vibeframe.handle_voice_turn", run_type="chain")
     async def _handle_voice_turn(
         self,
         *,
@@ -720,6 +745,7 @@ Return strict JSON only matching this schema:
   </div>
 </div>""".strip()
 
+    @traceable(name="vibeframe.ask_intake_agent", run_type="llm")
     async def _ask_intake_agent(self, brief: str) -> dict[str, Any]:
         """Use LLM to detect website genre and generate contextual clarifying questions."""
         response = await self.designer_llm.ainvoke(
@@ -746,6 +772,7 @@ Return strict JSON only matching this schema:
             payload["genre"] = "general"
         return payload
 
+    @traceable(name="vibeframe.generate_palettes_for_brief", run_type="llm")
     async def _generate_palettes_for_brief(self, brief: str, genre: str) -> list[dict[str, Any]]:
         """Use LLM to generate 3 custom color palettes tailored to the brief and genre."""
         _fallback_palettes = [
@@ -779,18 +806,6 @@ Return strict JSON only matching this schema:
             pass
         return _fallback_palettes
 
-    async def _load_palette_context(self, palette_artboard_id: str | None) -> str:
-        if not palette_artboard_id:
-            return ""
-        try:
-            return await self._get_document_html(node_id=palette_artboard_id)
-        except Exception:
-            return ""
-
-    @staticmethod
-    def _summarize_palette_context(_palette_context: str) -> str:
-        return "Palette confirmed and applied to design system."
-
     def _build_graph(self):
         graph = StateGraph(PipelineState)
         graph.add_node("designer_node", self._designer_node)
@@ -811,24 +826,6 @@ Return strict JSON only matching this schema:
         graph.add_edge("designer_refine_node", "critic_node")
         return graph.compile()
 
-
-    async def _parse_section_intent(self, brief: str) -> dict[str, Any]:
-        prompt = """Analyze the brief to see if the user explicitly wants multiple separate sections or pages as different artboards.
-Examples:
-- "three section website" -> {"multi_artboard": true, "artboard_names": ["Hero", "Features", "Contact"]}
-- "landing page" -> {"multi_artboard": false, "artboard_names": []}
-- "home about services contact pages" -> {"multi_artboard": true, "artboard_names": ["Home", "About", "Services", "Contact"]}
-
-Brief: """ + brief + """
-Return strict JSON only."""
-        try:
-            res = await self.designer_llm.ainvoke([HumanMessage(content=prompt)])
-            parsed = self._try_parse_json(getattr(res, "content", ""))
-            if isinstance(parsed, dict) and "multi_artboard" in parsed:
-                return parsed
-        except Exception:
-            pass
-        return {"multi_artboard": False, "artboard_names": []}
 
     async def _designer_node(self, state: PipelineState) -> PipelineState:
         await self.event_broker.publish({"type": "designer_started", "round": state.get("round", 0)})
@@ -1051,6 +1048,7 @@ Return strict JSON only."""
             return "refine"
         return "end"
 
+    @traceable(name="vibeframe.ask_designer", run_type="llm")
     async def _ask_designer(self, brief: str, current_html: str, critique: dict[str, Any]) -> dict[str, str]:
         critique_json = json.dumps(critique or {}, ensure_ascii=True)
         current_html_hint = current_html or "<empty-canvas />"
@@ -1095,6 +1093,7 @@ Return strict JSON only."""
             "html": html,
         }
 
+    @traceable(name="vibeframe.ask_designer_refine", run_type="llm")
     async def _ask_designer_refine(self, instruction: str, current_html: str) -> dict[str, str]:
         current_html_hint = current_html or "<empty-canvas />"
         message = (
@@ -1137,6 +1136,7 @@ Return strict JSON only."""
             "html": html,
         }
 
+    @traceable(name="vibeframe.ask_critic", run_type="llm")
     async def _ask_critic(self, brief: str, current_html: str, artboard_id: str) -> dict[str, Any]:
         screenshot = await self._get_artboard_screenshot_payload(artboard_id)
 
