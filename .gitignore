@@ -48,3 +48,5 @@ dist/
 .venv/
 __pycache__/
 backend/.env
+
+agentv2.md
