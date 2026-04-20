@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import WaveformVisualizer from "../components/WaveformVisualizer";
 import styles from "./page.module.css";
 
 type Critique = {
@@ -50,6 +51,14 @@ type PaperOpenResponse = {
   opened: boolean;
   message: string;
 };
+
+type TranscribeResponse = {
+  text: string;
+  provider: string;
+  model: string;
+};
+
+type VisualState = "idle" | "listening" | "thinking" | "speaking";
 
 function backendUrl() {
   return process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://127.0.0.1:8000";
@@ -133,19 +142,45 @@ function toErrorMessage(payload: unknown, fallback: string) {
   return fallback;
 }
 
+function getAgentLabel(agent: string) {
+  if (agent.includes("critic")) return "Critic";
+  if (agent.includes("design") || agent.includes("brief") || agent.includes("orchestrator")) return "Designer";
+  return "System";
+}
+
+function getAgentColor(agent: string) {
+  if (agent.includes("critic")) return "#f59e0b";
+  if (agent.includes("design") || agent.includes("brief") || agent.includes("orchestrator")) return "#6366f1";
+  return "#22c55e";
+}
+
+function formatTime(timestamp: number) {
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export default function HomePage() {
   const api = useMemo(() => backendUrl(), []);
+  const wsUrl = useMemo(() => {
+    const base = backendUrl();
+    return base.replace(/^http/, "ws") + "/ws/transcribe";
+  }, []);
   const [conversationId, setConversationId] = useState(() => newConversationId());
 
   const [message, setMessage] = useState("");
   const [transcript, setTranscript] = useState("");
-  const [assistantText, setAssistantText] = useState("Awaiting your brief...");
   const [stage, setStage] = useState("intake");
   const [questions, setQuestions] = useState<string[]>([]);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const [chat, setChat] = useState<ChatTurn[]>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const briefRef = useRef<HTMLTextAreaElement>(null);
+  const [autoSend, setAutoSend] = useState(false);
+  const [toast, setToast] = useState("");
+  const [isSpeaking, setIsSpeaking] = useState(false);
 
   const scrollToBottom = () => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -157,42 +192,57 @@ export default function HomePage() {
   const [busy, setBusy] = useState(false);
   const [listening, setListening] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(false);
-  const [status, setStatus] = useState("Ready");
+  const [status, setStatus] = useState("Idle");
   const [error, setError] = useState("");
   const [round, setRound] = useState(0);
 
   const [logsMinimized, setLogsMinimized] = useState(false);
-  const [logsHeight, setLogsHeight] = useState(240);
-  const dragRef = useRef(false);
-
-  useEffect(() => {
-    const handleMouseUp = () => {
-      dragRef.current = false;
-      document.body.style.cursor = "default";
-    };
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!dragRef.current) return;
-      // dragging up (negative movementY) increases height 
-      setLogsHeight((h) => Math.max(80, Math.min(800, h - e.movementY)));
-    };
-    document.addEventListener("mouseup", handleMouseUp);
-    document.addEventListener("mousemove", handleMouseMove);
-    return () => {
-      document.removeEventListener("mouseup", handleMouseUp);
-      document.removeEventListener("mousemove", handleMouseMove);
-    };
-  }, []);
+  const [toastVisible, setToastVisible] = useState(false);
+  const [chatPaneSize, setChatPaneSize] = useState(58);
+  const isResizingRef = useRef(false);
 
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const transcriptBufferRef = useRef("");
+  const interimTranscriptRef = useRef("");
+  const manualStopRef = useRef(false);
+  const restartTimerRef = useRef<number | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaChunksRef = useRef<Blob[]>([]);
+  const pendingRecorderStopRef = useRef<Promise<Blob | null> | null>(null);
   const voiceModeActiveRef = useRef(false);
   const spacebarHeldRef = useRef(false);
+  const autoSendRef = useRef(false);
+
+  // WebSocket ref for streaming transcription
+  const wsRef = useRef<WebSocket | null>(null);
+  const wsConnectedRef = useRef(false);
+
+  // Silence detection: auto-stop after 800ms of no speech
+  const silenceTimerRef = useRef<number | null>(null);
+  const SILENCE_TIMEOUT_MS = 800;
+  const lastSpeechTimeRef = useRef(0);
 
   useEffect(() => {
     if (events.length > 0) {
       logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
   }, [events]);
+
+  useEffect(() => {
+    if (!toast) {
+      setToastVisible(false);
+      return;
+    }
+
+    setToastVisible(true);
+    const timer = window.setTimeout(() => {
+      setToastVisible(false);
+      setToast("");
+    }, 3000);
+
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
   useEffect(() => {
     const EventSourceImpl = window.EventSource;
@@ -229,17 +279,69 @@ export default function HomePage() {
   }, [api]);
 
   useEffect(() => {
-    const SpeechRecognitionApi = window.SpeechRecognition ?? window.webkitSpeechRecognition;
-    setVoiceSupported(Boolean(SpeechRecognitionApi));
+    const onMouseMove = (event: MouseEvent) => {
+      if (!isResizingRef.current) return;
+      const rightPanel = document.getElementById("right-panel");
+      if (!rightPanel) return;
+      const rect = rightPanel.getBoundingClientRect();
+      const relativeY = event.clientY - rect.top;
+      const ratio = (relativeY / Math.max(rect.height, 1)) * 100;
+      const bounded = Math.min(78, Math.max(28, ratio));
+      setChatPaneSize(bounded);
+    };
+
+    const onMouseUp = () => {
+      isResizingRef.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
   }, []);
 
   useEffect(() => {
+    const SpeechRecognitionApi = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+    const mediaRecorderAvailable =
+      typeof window.MediaRecorder !== "undefined" &&
+      typeof navigator !== "undefined" &&
+      Boolean(navigator.mediaDevices?.getUserMedia);
+    setVoiceSupported(Boolean(SpeechRecognitionApi) || mediaRecorderAvailable);
+
+    // Warm up the WebSocket connection immediately to avoid initial latency
+    connectTranscribeWs();
+  }, [wsUrl]);
+
+  useEffect(() => {
     return () => {
+      if (restartTimerRef.current !== null) {
+        window.clearTimeout(restartTimerRef.current);
+      }
+      if (silenceTimerRef.current !== null) {
+        window.clearTimeout(silenceTimerRef.current);
+      }
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state !== "inactive") {
+        recorder.stop();
+      }
+      if (mediaStreamRef.current) {
+        for (const track of mediaStreamRef.current.getTracks()) {
+          track.stop();
+        }
+      }
       if (recognitionRef.current) {
         recognitionRef.current.stop();
       }
     };
   }, []);
+
+  useEffect(() => {
+    autoSendRef.current = autoSend;
+  }, [autoSend]);
 
   // Spacebar hold-to-record: press = start, release = stop + send
   useEffect(() => {
@@ -283,11 +385,25 @@ export default function HomePage() {
   async function resetSession() {
     voiceModeActiveRef.current = false;
     spacebarHeldRef.current = false;
+    manualStopRef.current = true;
+    if (restartTimerRef.current !== null) {
+      window.clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
+    if (silenceTimerRef.current !== null) {
+      window.clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
     }
     if (recognitionRef.current) {
       recognitionRef.current.stop();
+    }
+    await stopAudioCapture();
+    // Reset WebSocket
+    if (wsRef.current) {
+      try { wsRef.current.send(JSON.stringify({ action: "reset" })); } catch { /* ignore */ }
     }
     // Tell backend to clear the session so the next run creates a fresh canvas
     try {
@@ -307,8 +423,8 @@ export default function HomePage() {
     setTranscript("");
     setMessage("");
     setStatus("New session");
-    setAssistantText("Awaiting your brief...");
     setChat([]);
+    setToast("");
   }
 
   function speak(text: string) {
@@ -316,15 +432,18 @@ export default function HomePage() {
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "en-US";
+    utterance.onstart = () => setIsSpeaking(true);
     utterance.onend = () => {
+      setIsSpeaking(false);
       if (voiceModeActiveRef.current && !busy) {
         startVoice();
       }
     };
+    utterance.onerror = () => setIsSpeaking(false);
     window.speechSynthesis.speak(utterance);
   }
 
-  async function submitGenerate(text: string, source: "text" | "voice") {
+  async function handleSend(text: string, source: "text" | "voice") {
     const trimmed = text.trim();
     if (trimmed.length < 3) {
       setError("Please enter at least 3 characters.");
@@ -341,13 +460,11 @@ export default function HomePage() {
     setBusy(true);
     setError("");
     pushChat("user", trimmed, source === "voice" ? "You (voice)" : "You");
-    // Clear the voice transcript display immediately after sending
-    if (source === "voice") {
-      setTranscript("");
-      transcriptBufferRef.current = "";
-    } else {
-      setMessage("");
-    }
+    // Clear the voice transcript buffer immediately after any send (text or voice)
+    setTranscript("");
+    transcriptBufferRef.current = "";
+    interimTranscriptRef.current = "";
+    setMessage("");
 
     try {
       const response = await fetch(`${api}/generate`, {
@@ -370,7 +487,6 @@ export default function HomePage() {
       setQuestions(data.questions || []);
       setRound(data.round || 0);
       const msg = data.assistant_message || "Working...";
-      setAssistantText(msg);
       pushChat("assistant", msg, "AI Agent");
       speak(msg);
       // Note: questions are embedded in the AI's assistant_message — no separate system bubble needed
@@ -383,14 +499,243 @@ export default function HomePage() {
     }
   }
 
+  async function transcribeAudioBlob(blob: Blob): Promise<string> {
+    const formData = new FormData();
+    const fileName = blob.type.includes("wav") ? "voice.wav" : "voice.webm";
+    formData.append("audio", blob, fileName);
+    formData.append("language", navigator.language || "en-US");
+
+    const response = await fetch(`${api}/transcribe`, {
+      method: "POST",
+      body: formData,
+    });
+
+    const payload = (await response.json()) as TranscribeResponse | { detail?: string };
+    if (!response.ok) {
+      throw new Error(toErrorMessage(payload, "Audio transcription failed."));
+    }
+    return (payload as TranscribeResponse).text?.trim() ?? "";
+  }
+
+  async function startAudioCapture(): Promise<boolean> {
+    if (!navigator.mediaDevices?.getUserMedia || typeof window.MediaRecorder === "undefined") {
+      return false;
+    }
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      return true;
+    }
+
+    try {
+      let stream = mediaStreamRef.current;
+      if (!stream) {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            channelCount: 1,
+            sampleRate: 16000,
+          },
+        });
+        mediaStreamRef.current = stream;
+      }
+
+      mediaChunksRef.current = [];
+
+      const mimeCandidates = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/mp4",
+      ];
+      const supportedMime = mimeCandidates.find((candidate) => MediaRecorder.isTypeSupported(candidate));
+      const recorder = supportedMime
+        ? new MediaRecorder(stream, { mimeType: supportedMime })
+        : new MediaRecorder(stream);
+
+      recorder.ondataavailable = (event: BlobEvent) => {
+        if (event.data && event.data.size > 0) {
+          mediaChunksRef.current.push(event.data);
+          // Also stream chunks over WebSocket for real-time server transcription
+          if (wsRef.current && wsConnectedRef.current) {
+            event.data.arrayBuffer().then((buf) => {
+              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(buf);
+              }
+            }).catch(() => { /* ignore */ });
+          }
+        }
+      };
+
+      // Smaller timeslice for faster chunk delivery (100ms instead of 250ms)
+      recorder.start(100);
+      mediaRecorderRef.current = recorder;
+
+      // Open WebSocket connection for streaming transcription
+      connectTranscribeWs();
+
+      return true;
+    } catch (err) {
+      const messageText = err instanceof Error ? err.message : "Microphone permission denied.";
+      setError(`Voice error: ${messageText}`);
+      return false;
+    }
+  }
+
+  async function stopAudioCapture(): Promise<Blob | null> {
+    if (pendingRecorderStopRef.current) {
+      return pendingRecorderStopRef.current;
+    }
+
+    const recorder = mediaRecorderRef.current;
+    if (!recorder) {
+      return null;
+    }
+
+    const finalizeBlob = () => {
+      const chunkCount = mediaChunksRef.current.length;
+      const mimeType = recorder.mimeType || "audio/webm";
+      const blob = chunkCount > 0 ? new Blob(mediaChunksRef.current, { type: mimeType }) : null;
+      mediaChunksRef.current = [];
+      mediaRecorderRef.current = null;
+      // Intentionally DO NOT stop the mediaStreamRef tracks!
+      // Keeping the tracks active prevents the 1-2 second hardware warmup lag on subsequent recordings.
+      return blob;
+    };
+
+    if (recorder.state === "inactive") {
+      return finalizeBlob();
+    }
+
+    pendingRecorderStopRef.current = new Promise<Blob | null>((resolve) => {
+      const onStop = () => {
+        resolve(finalizeBlob());
+      };
+      recorder.addEventListener("stop", onStop, { once: true });
+      recorder.stop();
+    }).finally(() => {
+      pendingRecorderStopRef.current = null;
+    });
+
+    return pendingRecorderStopRef.current;
+  }
+
+  async function finalizeVoiceCapture(recognizedText: string) {
+    let finalText = recognizedText.trim();
+    const recognizedWordCount = finalText ? finalText.split(/\s+/).filter(Boolean).length : 0;
+
+    const recordedBlob = await stopAudioCapture();
+    const shouldUseServerTranscription = Boolean(recordedBlob) && recognizedWordCount === 0;
+
+    if (shouldUseServerTranscription && recordedBlob) {
+      // Try WebSocket finalize first for faster result, fall back to HTTP
+      let wsTranscriptReceived = false;
+
+      if (wsRef.current && wsConnectedRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        try {
+          setStatus("Transcribing audio");
+          const wsResult = await new Promise<string>((resolve, reject) => {
+            const ws = wsRef.current;
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+              reject(new Error("WS not open"));
+              return;
+            }
+            const timeout = setTimeout(() => reject(new Error("WS timeout")), 8000);
+            const handler = (ev: MessageEvent) => {
+              clearTimeout(timeout);
+              ws.removeEventListener("message", handler);
+              try {
+                const data = JSON.parse(ev.data);
+                if (data.error) reject(new Error(data.error));
+                else resolve(data.text || "");
+              } catch { resolve(""); }
+            };
+            ws.addEventListener("message", handler);
+            ws.send(JSON.stringify({ action: "finalize", language: navigator.language || "en-US" }));
+          });
+          if (wsResult && (!finalText || wsResult.length > finalText.length + 12)) {
+            finalText = wsResult;
+          }
+          wsTranscriptReceived = true;
+        } catch {
+          // WS failed, fall through to HTTP
+        }
+      }
+
+      if (!wsTranscriptReceived) {
+        const previousStatus = status;
+        try {
+          setStatus("Transcribing audio");
+          const serverTranscript = await transcribeAudioBlob(recordedBlob);
+          if (serverTranscript && (!finalText || serverTranscript.length > finalText.length + 12)) {
+            finalText = serverTranscript;
+          }
+        } catch {
+          // Keep browser transcript if server fallback fails.
+        } finally {
+          setStatus(previousStatus || "Idle");
+        }
+      }
+    }
+
+    finalText = finalText.replace(/\s+/g, " ").trim();
+    transcriptBufferRef.current = finalText;
+    interimTranscriptRef.current = "";
+    setTranscript(finalText);
+    setMessage(finalText);
+
+    if (finalText && autoSendRef.current) {
+      void handleSend(finalText, "voice");
+    } else if (finalText) {
+      briefRef.current?.focus();
+      setToast("Transcript ready - edit or click Send Brief");
+    } else {
+      setError("I couldn't catch that clearly. Please try again.");
+    }
+  }
+
+  function connectTranscribeWs() {
+    // Reuse existing open connection
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
+    // Close stale connection
+    if (wsRef.current) {
+      try { wsRef.current.close(); } catch { /* ignore */ }
+    }
+    try {
+      const ws = new WebSocket(wsUrl);
+      ws.binaryType = "arraybuffer";
+      ws.onopen = () => { wsConnectedRef.current = true; };
+      ws.onclose = () => { wsConnectedRef.current = false; };
+      ws.onerror = () => { wsConnectedRef.current = false; };
+      wsRef.current = ws;
+    } catch {
+      // WebSocket not available — will fall back to HTTP POST
+      wsConnectedRef.current = false;
+    }
+  }
+
   function startVoice() {
     voiceModeActiveRef.current = true;
+    manualStopRef.current = false;
+    if (restartTimerRef.current !== null) {
+      window.clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
+    if (silenceTimerRef.current !== null) {
+      window.clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
     }
+    if (recognitionRef.current) {
+      return;
+    }
+    void startAudioCapture();
     const SpeechRecognitionApi = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     if (!SpeechRecognitionApi) {
-      setError("Voice capture requires Chrome Web Speech API.");
+      setListening(true);
+      setStatus("Listening");
       return;
     }
 
@@ -399,64 +744,125 @@ export default function HomePage() {
     if (!spacebarHeldRef.current) {
       setTranscript("");
       transcriptBufferRef.current = "";
+      interimTranscriptRef.current = "";
     }
 
     const recognition = new SpeechRecognitionApi();
-    recognition.lang = "en-US";
+    recognition.lang = navigator.language || "en-US";
     recognition.continuous = true;   // Keep listening through pauses
     recognition.interimResults = true;
-    recognition.maxAlternatives = 1;
+    recognition.maxAlternatives = 3;
 
-    recognition.onstart = () => setListening(true);
+    recognition.onstart = () => {
+      setListening(true);
+      setStatus("Listening");
+      lastSpeechTimeRef.current = Date.now();
+    };
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
       let interim = "";
+      let gotFinal = false;
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const result = event.results[i];
         const chunk = result[0]?.transcript ?? "";
         if (result.isFinal) {
-          transcriptBufferRef.current += `${chunk} `;
+          gotFinal = true;
+          if (chunk.trim()) {
+            const merged = `${transcriptBufferRef.current} ${chunk}`.replace(/\s+/g, " ").trim();
+            transcriptBufferRef.current = merged;
+          }
         } else {
-          interim += chunk;
+          interim += `${chunk} `;
         }
       }
-      setTranscript(`${transcriptBufferRef.current}${interim}`.trim());
+      interimTranscriptRef.current = interim.replace(/\s+/g, " ").trim();
+      const liveTranscript = `${transcriptBufferRef.current} ${interimTranscriptRef.current}`.replace(/\s+/g, " ").trim();
+      setTranscript(liveTranscript);
+      setMessage(liveTranscript);
+
+      // Reset silence timer whenever speech is detected
+      if (gotFinal || interim.trim()) {
+        lastSpeechTimeRef.current = Date.now();
+        if (silenceTimerRef.current !== null) {
+          window.clearTimeout(silenceTimerRef.current);
+        }
+        
+        // Final fallback timeout for pure silence
+        if (!spacebarHeldRef.current) {
+          silenceTimerRef.current = window.setTimeout(() => {
+            silenceTimerRef.current = null;
+            if (voiceModeActiveRef.current && !spacebarHeldRef.current && transcriptBufferRef.current.trim()) {
+              stopVoice();
+            }
+          }, SILENCE_TIMEOUT_MS);
+        }
+      }
     };
 
     recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
       // "no-speech" and "aborted" are expected during hold — don't treat as errors
       if (event.error === "no-speech" || event.error === "aborted") return;
       setListening(false);
+      recognitionRef.current = null;
+      voiceModeActiveRef.current = false;
       setError(`Voice error: ${event.error}`);
     };
 
     recognition.onend = () => {
-      // If spacebar is still held, the browser cut us off — restart immediately
-      if (spacebarHeldRef.current) {
+      recognitionRef.current = null;
+
+      // If mic mode is still active (space-hold or mic toggle), the browser may have ended
+      // this segment automatically. Restart and keep accumulating transcript.
+      if (!manualStopRef.current && (spacebarHeldRef.current || voiceModeActiveRef.current) && !busy && !isSpeaking) {
         recognitionRef.current = null;
-        startVoice();
+        restartTimerRef.current = window.setTimeout(() => {
+          restartTimerRef.current = null;
+          startVoice();
+        }, 80); // Reduced from 120ms for faster restart
         return;
       }
+
       // Spacebar was released — finalize and submit
       setListening(false);
-      const finalText = transcriptBufferRef.current.trim();
-      setTranscript(finalText);
-      if (finalText) {
-        void submitGenerate(finalText, "voice");
-      }
+      setStatus("Idle");
+      const finalText = `${transcriptBufferRef.current} ${interimTranscriptRef.current}`.replace(/\s+/g, " ").trim();
+      void finalizeVoiceCapture(finalText);
     };
 
     recognitionRef.current = recognition;
-    recognition.start();
+    try {
+      recognition.start();
+    } catch {
+      recognitionRef.current = null;
+      setListening(false);
+      setError("Could not start voice capture. Please try again.");
+    }
   }
 
   function stopVoice() {
     voiceModeActiveRef.current = false;
+    manualStopRef.current = true;
+    if (restartTimerRef.current !== null) {
+      window.clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
+    if (silenceTimerRef.current !== null) {
+      window.clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
     }
+    setStatus("Idle");
+    const hasRecognitionSession = Boolean(recognitionRef.current);
     recognitionRef.current?.stop();
+    if (!hasRecognitionSession) {
+      setListening(false);
+      void finalizeVoiceCapture("");
+    }
   }
+
+  const visualState: VisualState = isSpeaking ? "speaking" : busy ? "thinking" : listening ? "listening" : status === "Transcribing" ? "thinking" : "idle";
 
   async function openPaperCanvas() {
     // Try direct protocol link first — no backend round-trip needed
@@ -494,162 +900,200 @@ export default function HomePage() {
   return (
     <main className={styles.page}>
       <header className={styles.topBar}>
-        <div className={styles.brandBlock}>
+        <div className={styles.topLeft}>
           <div className={styles.brand}>Vibeframe</div>
           <div className={styles.connected}>PAPER CONNECTED</div>
         </div>
-        <div className={styles.topActions}>
-          <span className={styles.signal}>{listening ? "Listening" : "Idle"}</span>
-          <button className={styles.primaryButton} type="button" onClick={openPaperCanvas}>
+        <div className={styles.topRight}>
+          <span className={styles.signal}>{status || (listening ? "Listening" : "Idle")}</span>
+          <button className={styles.navButton} type="button" onClick={openPaperCanvas}>
             Paper Canvas
           </button>
         </div>
       </header>
 
       <section className={styles.content}>
-        <aside className={styles.sideRail}>
-          <button className={styles.railItem} onClick={resetSession} type="button">
-            NEW
-          </button>
-        </aside>
-
         <div className={styles.leftPanel}>
-          <div className={styles.orbWrap}>
-            <div className={styles.orbGlow} />
-            <div className={styles.orb}>{listening ? "◉" : "◍"}</div>
-          </div>
-          <p className={styles.kicker}>{listening ? "LISTENING..." : transcript ? "CURRENT TRANSCRIPTION" : "HOLD SPACE TO TALK"}</p>
-          <p className={styles.transcript}>
-            {transcript ? (transcript.length > 120 ? `${transcript.slice(0, 120)}...` : transcript) : (listening ? "Listening..." : "Vibeframe Ready")}
-          </p>
+          <section className={styles.voiceZone}>
+            <div className={styles.voiceZoneInner} data-state={visualState}>
+              <WaveformVisualizer state={visualState} />
+              <p className={styles.voiceHint}>
+                {visualState === "listening"
+                  ? "Listening..."
+                  : visualState === "thinking"
+                    ? status === "Transcribing"
+                      ? "Transcribing your voice..."
+                      : "Agents thinking..."
+                    : visualState === "speaking"
+                      ? "Vibeframe speaking"
+                      : "Hold Space · Click Mic · or Type below"}
+              </p>
+            </div>
+          </section>
 
-          <div className={styles.controls}>
-            <textarea
-              className={styles.input}
-              value={message}
-              onChange={(event) => setMessage(event.target.value)}
-              rows={3}
-              placeholder="Describe your website (e.g., 'Modern SaaS landing page for a crypto wallet')..."
-            />
-            <div className={styles.controlRow}>
-              <button className={styles.primaryButton} disabled={busy} onClick={() => void submitGenerate(message, "text")} type="button">
-                {busy ? "Sending..." : "Send"}
-              </button>
-              <button className={styles.secondaryButton} disabled={!voiceSupported || listening} onClick={startVoice} type="button">
-                Start Voice
-              </button>
-              <button className={styles.secondaryButton} disabled={!listening} onClick={stopVoice} type="button">
-                Stop
-              </button>
+          <section className={styles.inputZone}>
+            <div className={styles.inputHeader}>
+              <span className={styles.sectionLabel}>Brief</span>
+              <label className={styles.toggleRow}>
+                <span className={styles.toggleLabel}>Auto-send voice</span>
+                <span className={styles.toggleSwitch} data-active={autoSend ? "true" : "false"}>
+                  <input
+                    aria-label="Auto-send voice"
+                    checked={autoSend}
+                    type="checkbox"
+                    onChange={(event) => setAutoSend(event.target.checked)}
+                  />
+                  <span className={styles.toggleTrack}>
+                    <span className={styles.toggleThumb} />
+                  </span>
+                </span>
+              </label>
             </div>
 
-          </div>
+            <textarea
+              ref={briefRef}
+              className={styles.textarea}
+              value={message}
+              onChange={(event) => {
+                setMessage(event.target.value);
+                transcriptBufferRef.current = event.target.value;
+                setTranscript(event.target.value);
+              }}
+              placeholder="Describe your website or hold Space to speak..."
+              rows={4}
+            />
+
+            <div className={styles.inputActions}>
+              <button
+                className={`${styles.micButton} ${listening ? styles.micButtonActive : ""}`}
+                type="button"
+                onClick={() => {
+                  if (listening) {
+                    stopVoice();
+                  } else {
+                    startVoice();
+                  }
+                }}
+                disabled={!voiceSupported && !listening}
+                aria-label={listening ? "Stop recording" : "Start recording"}
+              >
+                {listening ? (
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="7" y="7" width="10" height="10" rx="3" />
+                  </svg>
+                ) : (
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 14a3 3 0 0 0 3-3V7a3 3 0 0 0-6 0v4a3 3 0 0 0 3 3Z" />
+                    <path d="M5 11a7 7 0 0 0 14 0" />
+                    <path d="M12 18v3" />
+                  </svg>
+                )}
+              </button>
+
+              <div className={styles.actionSpacer} />
+
+              <button className={styles.sendButton} disabled={busy} onClick={() => void handleSend(message, "text")} type="button">
+                Send Brief
+              </button>
+            </div>
+          </section>
+
         </div>
 
-        <section className={styles.rightPanel}>
-          <div className={styles.streamHeader}>
-            <h2>LIVE COORDINATION STREAM</h2>
-            <span>ACTIVE SYNC</span>
+        <section
+          className={styles.rightPanel}
+          id="right-panel"
+          style={{ "--chat-pane-size": `${chatPaneSize}%` } as CSSProperties}
+        >
+          <div className={styles.historyCard}>
+            <div className={styles.historyHeader}>
+              <span className={styles.logsTitle}>CONVERSATION</span>
+            </div>
+            <section className={styles.historyZoneRight}>
+              {chat.length ? (
+                chat.map((item) => {
+                  const isUser = item.role === "user";
+                  return (
+                    <div className={`${styles.historyLine} ${isUser ? styles.historyLineUser : styles.historyLineAi}`} key={item.id}>
+                      <span className={isUser ? styles.historyPrefixUser : styles.historyPrefixAi}>{isUser ? "You" : "AI"}</span>
+                      <span className={`${styles.historyText} ${isUser ? styles.historyTextUser : styles.historyTextAi}`}>{item.text}</span>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className={styles.historyEmpty}>Conversation history will appear here.</div>
+              )}
+              <div ref={chatEndRef} />
+            </section>
           </div>
 
-          <div className={styles.feed}>
-            {chat.length ? (
-              chat.map((item) => (
-                <article
-                  key={item.id}
-                  className={`${styles.bubble} ${
-                    item.role === "user" ? styles.bubbleUser : item.role === "assistant" ? styles.bubbleAssistant : styles.bubbleSystem
-                  }`}
-                >
-                  <p>{item.text}</p>
-                  <small>{item.meta}</small>
-                </article>
-              ))
-            ) : (
-              <div className={styles.feedEmpty}>
-                <div className={styles.emptyIcon}>✦</div>
-                <div className={styles.emptyText}>
-                  Your creation journey starts here.<br />
-                  Voice your ideas or type a brief to begin.
-                </div>
-              </div>
-            )}
-            <div ref={chatEndRef} />
-          </div>
+          <div
+            className={styles.logsDivider}
+            role="separator"
+            aria-label="Resize conversation and logs"
+            aria-orientation="horizontal"
+            onMouseDown={() => {
+              isResizingRef.current = true;
+              document.body.style.cursor = "row-resize";
+              document.body.style.userSelect = "none";
+            }}
+          />
 
-          <div className={styles.logsWrap}>
-            <div
-              className={styles.logsResizer}
-              onMouseDown={() => {
-                if (logsMinimized) return;
-                dragRef.current = true;
-                document.body.style.cursor = "row-resize";
-              }}
-            >
-              <div className={styles.resizerHandle} />
-              <div className={styles.logsActions}>
-                <span className={styles.logsTitle}>AGENT LOGS</span>
-                <button
-                  type="button"
-                  onClick={() => setLogsMinimized((m) => !m)}
-                  className={styles.minimizeBtn}
-                  onMouseDown={(e) => e.stopPropagation()}
-                >
-                  {logsMinimized ? (
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="18 15 12 9 6 15" />
-                    </svg>
-                  ) : (
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="5" y1="12" x2="19" y2="12" />
-                    </svg>
-                  )}
-                </button>
-              </div>
+          <div className={`${styles.logsCard} ${logsMinimized ? styles.logsCardMinimized : ""}`}>
+            <div className={styles.logsHeader}>
+              <span className={styles.logsTitle}>AGENT LOGS</span>
+              <button
+                type="button"
+                onClick={() => setLogsMinimized((value) => !value)}
+                className={styles.minimizeButton}
+                aria-label={logsMinimized ? "Expand logs" : "Minimize logs"}
+              >
+                {logsMinimized ? "+" : "−"}
+              </button>
             </div>
 
-            {!logsMinimized && (
-              <div className={styles.logs} style={{ height: logsHeight }}>
-                <div className={styles.logsInner}>
-                  {events.length ? (
-                    events.map((ev) => {
-                      const color = AGENT_COLORS[ev.agent] ?? "#6b7280";
-                      const label = AGENT_LABELS[ev.agent] ?? ev.agent.replaceAll("_", " ");
-                      return (
-                        <div 
-                          key={ev.id} 
-                          className={styles.agentBubble}
-                          style={{
-                            "--agent-color": color,
-                            "--agent-bg-color": hexToRgba(color, 0.08),
-                            "--agent-border-color": hexToRgba(color, 0.18),
-                          } as React.CSSProperties}
-                        >
-                          <div className={styles.agentAvatarWrap}>
-                            <span className={styles.agentPulse} />
-                            <span className={styles.agentDot} />
-                          </div>
-                          <div className={styles.agentContent}>
-                            <span className={styles.agentName} style={{ color }}>
-                              {label}
-                            </span>
-                            <span className={styles.agentMessage}>{ev.message}</span>
-                          </div>
-                        </div>
-                      );
-                    })
-                  ) : (
-                    <div className={styles.logsEmpty}>Waiting for agent activity...</div>
-                  )}
-                  <div ref={logsEndRef} />
-                </div>
+            {!logsMinimized ? (
+              <div className={styles.logsList}>
+                {events.length ? (
+                  events.map((event) => {
+                    const color = getAgentColor(event.agent);
+                    const label = getAgentLabel(event.agent);
+                    return (
+                      <div className={styles.logRow} key={event.id}>
+                        <span className={styles.logDot} style={{ backgroundColor: color }} />
+                        <span className={styles.logAgent} style={{ color }}>
+                          {label}
+                        </span>
+                        <span className={styles.logMessage}>{event.message}</span>
+                        <span className={styles.logTime}>{formatTime(event.timestamp)}</span>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className={styles.logsEmpty}>Waiting for agent activity...</div>
+                )}
               </div>
-            )}
+            ) : null}
+          </div>
+
+          <div className={styles.roundCard}>
+            <span className={styles.roundLabel}>Round</span>
+            <div className={styles.roundDots} aria-hidden="true">
+              <span className={round >= 1 ? styles.roundDotActive : styles.roundDot} />
+              <span className={round >= 2 ? styles.roundDotActive : styles.roundDot} />
+              <span className={round >= 3 ? styles.roundDotActive : styles.roundDot} />
+            </div>
+            <span className={styles.roundAction}>{busy ? "Designer working..." : status}</span>
+            <button className={styles.stopButton} onClick={resetSession} type="button">
+              Stop
+            </button>
           </div>
         </section>
       </section>
 
       {error ? <div className={styles.errorBanner}>{error}</div> : null}
+
+      {toastVisible ? <div className={styles.toast}>{toast}</div> : null}
     </main>
   );
 }
