@@ -5,6 +5,9 @@ groq==0.22.0
 python-dotenv==1.1.0
 pydantic==2.11.3
 pydantic-settings==2.8.1
+python-multipart==0.0.20
 langgraph==0.2.62
 langchain-core==0.3.35
 langchain-groq==0.2.3
+langchain-mistralai==0.2.5
+websockets>=12.0

@@ -16,6 +16,9 @@ class Settings(BaseSettings):
 
     groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
     groq_model: str = Field(default="llama-3.3-70b-versatile", alias="GROQ_MODEL")
+    groq_transcription_model: str = Field(default="whisper-large-v3-turbo", alias="GROQ_TRANSCRIPTION_MODEL")
+    mistral_api_key: str = Field(default="", alias="MISTRAL_API_KEY")
+    mistral_model: str = Field(default="mistral-large-latest", alias="MISTRAL_MODEL")
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     gemini_critic_model: str = Field(default="gemini-2.0-flash", alias="GEMINI_CRITIC_MODEL")
     gemini_api_base: str = Field(default="https://generativelanguage.googleapis.com/v1beta", alias="GEMINI_API_BASE")
@@ -23,6 +26,12 @@ class Settings(BaseSettings):
     paper_mcp_url: str = Field(default="http://127.0.0.1:29979/mcp", alias="PAPER_MCP_URL")
     paper_mcp_timeout_seconds: float = Field(default=20.0, alias="PAPER_MCP_TIMEOUT_SECONDS")
     paper_desktop_path: str = Field(default="", alias="PAPER_DESKTOP_PATH")
+
+    # LangSmith tracing configuration
+    langsmith_tracing: bool = Field(default=False, alias="LANGSMITH_TRACING")
+    langsmith_api_key: str = Field(default="", alias="LANGSMITH_API_KEY")
+    langsmith_project: str = Field(default="vibeframe", alias="LANGSMITH_PROJECT")
+    langsmith_endpoint: str = Field(default="https://api.smith.langchain.com", alias="LANGSMITH_ENDPOINT")
 
 
 settings = Settings()

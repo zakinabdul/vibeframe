@@ -76,3 +76,9 @@ class PaperOpenResponse(BaseModel):
 
 class ResetSessionRequest(BaseModel):
     conversation_id: str | None = None
+
+
+class TranscribeResponse(BaseModel):
+    text: str = ""
+    provider: str = "groq"
+    model: str = ""

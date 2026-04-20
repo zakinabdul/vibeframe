@@ -1,14 +1,44 @@
 import asyncio
 import json
+import os
 from typing import Any, Literal, TypedDict
 
 import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langgraph.graph import END, START, StateGraph
+from langsmith import traceable
+from pydantic import SecretStr
+
+try:
+    from langchain_mistralai import ChatMistralAI
+except Exception:
+    ChatMistralAI = None  # type: ignore
 
 from app.config import settings
 from app.paper_mcp import PaperMCPClient, PaperMCPProtocolError
+
+# Experimental v2 pipeline lives in agentv2.py. We expose it here so callers can
+# trial new behavior without replacing the stable endpoint pipeline in this file.
+try:
+    from agentv2 import AgentEventBroker as AgentEventBrokerV2
+    from agentv2 import PipelineState as PipelineStateV2
+    from agentv2 import VibeframeAgentPipeline as VibeframeAgentPipelineV2
+except Exception:
+    AgentEventBrokerV2 = None  # type: ignore
+    PipelineStateV2 = None  # type: ignore
+    VibeframeAgentPipelineV2 = None  # type: ignore
+
+
+# Ensure LangSmith environment variables are visible before any model calls.
+if settings.langsmith_tracing:
+    os.environ["LANGSMITH_TRACING"] = "true"
+if settings.langsmith_api_key:
+    os.environ["LANGSMITH_API_KEY"] = settings.langsmith_api_key
+if settings.langsmith_project:
+    os.environ["LANGSMITH_PROJECT"] = settings.langsmith_project
+if settings.langsmith_endpoint:
+    os.environ["LANGSMITH_ENDPOINT"] = settings.langsmith_endpoint
 
 
 DESIGNER_SYSTEM_PROMPT = """You are Vibeframe's Principal Design Engineer. Your goal is to output a "Best-in-Class" landing page that looks like a high-end Dribbble or Linear.app concept.
@@ -30,12 +60,13 @@ STRUCTURAL REQUIREMENTS:
 - HERO: Must be cinematic. Use a "Glow" effect (a radial gradient div behind the text) to create depth.
 - TYPOGRAPHY: Use a system font stack: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'.
 - SPACING: Use the "8pt Grid System." Everything should be multiples of 8 (16, 24, 32, 64, 128).
+- FULL BLEED: Root container must be edge-to-edge (`width:100%`, `margin:0`, no outer max-width wrapper).
 
 TECHNICAL CONSTRAINTS:
 1. One root <div> only.
 2. 100% Inline styles. No <style> tags.
 3. Use `min-height: 100vh` for sections to ensure they feel full and intentional.
-4. Max-width container: Wrap content in a 1200px max-width div centered with `margin: 0 auto`.
+4. Do not use an outer page-level max-width container.
 
 OUTPUT CONTRACT:
 - Return strict JSON: {"summary": "Brief design rationale", "html": "Full HTML string"}
@@ -182,8 +213,26 @@ class VibeframeAgentPipeline:
         self.gemini_api_key = settings.gemini_api_key
         self.gemini_critic_model = settings.gemini_critic_model
         self.gemini_api_base = settings.gemini_api_base.rstrip("/")
-        self.designer_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.35, api_key=groq_api_key)
-        self.critic_llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.1, api_key=groq_api_key)
+        secret_key = SecretStr(groq_api_key)
+        self.designer_backend_name = "groq"
+        self.designer_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.35, api_key=secret_key)
+
+        mistral_key = (settings.mistral_api_key or "").strip()
+        mistral_model = (settings.mistral_model or "mistral-large-latest").strip()
+        if ChatMistralAI is not None and mistral_key:
+            try:
+                self.designer_llm = ChatMistralAI(
+                    model_name=mistral_model,
+                    temperature=0.35,
+                    api_key=SecretStr(mistral_key),  # type: ignore[arg-type]
+                )
+                self.designer_backend_name = "mistral"
+            except Exception:
+                self.designer_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.35, api_key=secret_key)
+                self.designer_backend_name = "groq"
+        print(f"[Vibeframe][agents.py] Designer backend active: {self.designer_backend_name}")
+
+        self.critic_llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.1, api_key=secret_key)
         self._conversation_sessions: dict[str, ConversationSession] = {}
         self._gemini_circuit_open_until: float = 0.0  # epoch timestamp; Gemini skipped until this time
         self.graph = self._build_graph()
@@ -203,6 +252,7 @@ Never use bullet points or bold markdown in your spoken responses. Keep it conve
         except Exception:
             return "Let's get started!"
 
+    @traceable(name="vibeframe.generate", run_type="chain", tags=["vibeframe", "generate"])
     async def run_generate(
         self,
         brief: str,
@@ -308,6 +358,7 @@ Never use bullet points or bold markdown in your spoken responses. Keep it conve
             )
             raise
 
+    @traceable(name="vibeframe.refine", run_type="chain", tags=["vibeframe", "refine"])
     async def run_refine(self, artboard_id: str, instruction: str) -> dict[str, Any]:
         await self.event_broker.publish({"type": "refine_started", "artboard_id": artboard_id})
         current_html = await self._get_document_html(node_id=artboard_id)
